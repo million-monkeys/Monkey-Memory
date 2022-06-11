@@ -131,6 +131,9 @@ To use it with spdlog:
 ```
 ### `out_of_space_policies::Ignore`
 This policy silently ignores the error and returns `nullptr`.
+```cpp
+Buffer* buffer1 = buffers.allocate<out_of_space_policies::Ignore>();
+```
 
 # Pools
 
