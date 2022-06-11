@@ -106,6 +106,32 @@ buffers.reset(); // buffer2 is now invalid and must no longer be used. buffer1 i
 
 Typically, static buffers are used as the *first* buffer in a chain, while dynamic buffers are the subsequent buffers that are added on demaind from the pre-allocated pool. It is recommended that the static buffer is sized to accommodate the average size requirement, so that the typical use of the buffer will fit within a single static buffer, and that dynamic buffers are used to handle the cases when there is a spike in requirements. For example, a typical use case would be a game event system: if most frames are expected to dispatch 10 events, then the first (static) buffer in the chain should be sized to fit 10 events (or perhaps slightly more like 11 or 12), but if there is a sudden spike in activity that requires 15 or 20 events, dynamic buffers are added to the chain for that frame to accommodate the extra events.
 
+## Out of Space Policies
+
+If an attempt is made to allocate a dynamic buffer when there are no more unused buffers remaining in the pool, by default, an `std::runtime_error` exception is thrown. However, this can be controlled using an `out of space policy`. Three policies exist, but it is possible to create custom ones if the need arises:
+
+### `out_of_space_policies::Throw`
+This is the default. If the `BufferPool` does not have any unused buffers to allocate, an exception is thrown.
+```cpp
+Buffer* buffer1 = buffers.allocate();
+Buffer* buffer2 = buffers.allocate<out_of_space_policies::Throw>(); // Same as above
+```
+### `out_of_space_policies::Log`
+This policy will log the error and then continue by returning a `nullptr` instead of a pointer to a buffer.
+```cpp
+Buffer* buffer1 = buffers.allocate<out_of_space_policies::Log>();
+```
+A log function must be provided by defining the `ERROR_LOG_FUNCTION` macro. This function should take at least two arguments:
+```
+void log_func (const std::string& label, const std::string& name)
+```
+To use it with spdlog:
+```
+#define ERROR_LOG_FUNCTION(a, b) spdlog::error("{}: {}", a, b)
+```
+### `out_of_space_policies::Ignore`
+This policy silently ignores the error and returns `nullptr`.
+
 # Pools
 
 Similar to how Buffers are not expected to be created directly, it is also not expected that `BufferPools` are used to allocate buffers directly. Instead, they should be created (their dynamic pool preallocated) and then passed to higher level abstractions to actually manage buffer allocations. One such abstraction is the `Pool`, which is a buffer-backed utility to allocate chunks of memory. Pools can be typed (they allocate typed objects) or untyped (they allocate a series of bytes) and they can be heterogeneous (each allocation can be of a different size) or homogeneous (each allocation is identical). Typed pools are built on top of untyped pools.
