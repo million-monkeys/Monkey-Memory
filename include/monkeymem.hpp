@@ -15,7 +15,7 @@ namespace monkeymem {
         namespace log {
             template <typename... Args> void error (Args... args) {}
         }
-        #define ERROR_LOG_FUNCTION(fmt, ...) log::error
+        #define ERROR_LOG_FUNCTION log::error
     #endif
 
     namespace helpers {
@@ -65,7 +65,7 @@ namespace monkeymem {
         struct Log {
             template <typename T>
             static T* apply (const std::string& name) {
-                ERROR_LOG_FUNCTION("Allocated more items than reserved space: ", name);
+                ERROR_LOG_FUNCTION("Allocated more items than reserved space", name);
                 return nullptr;
             }
         };
@@ -152,10 +152,7 @@ namespace monkeymem {
             return m_memory;
         }
 
-        std::byte* end () const {
-            return m_memory + m_end;
-        }
-
+        std::byte* end () const {OutOfSpacePolicy
         // Set the end of the buffer
         void end (std::size_t e) {
             if (e > m_size) {
@@ -218,7 +215,6 @@ namespace monkeymem {
                 m_buffer.emplace_back(Buffer::create(allocator, buffer_size, AlignmentBoundary));
             }
         }
-        ~BufferPool () {}
 
         const Buffer& operator[] (std::size_t index) const {
             return m_buffer[index];
@@ -251,8 +247,14 @@ namespace monkeymem {
             m_buffers.clear();
         }
 
-        Buffer& allocate () {
-            return m_buffers[m_next.fetch_add(1)];
+        template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
+        Buffer* allocate () {
+            auto index = m_next.fetch_add(1);
+            if (index < m_buffers.size()) {
+                return &m_buffers[index];
+            } else {
+                return OutOfSpacePolicy::apply<Buffer>("BufferPool");
+            }
         }
 
         void reset () {
@@ -263,9 +265,9 @@ namespace monkeymem {
             m_next.store(0);
         }
 
-        Buffer& allocate_static (std::size_t buffer_size) {
+        Buffer* allocate_static (std::size_t buffer_size) {
             m_static_buffers.emplace_back(Buffers::create(m_allocator, buffer_size, AlignmentBoundary));
-            return m_static_buffers.back();
+            return &m_static_buffers.back();
         }
 
     private:
@@ -290,7 +292,7 @@ namespace monkeymem {
                 using OutOfSpacePolicyType = OutOfSpacePolicy;
 
                 BaseStackPool (BufferPool& buffers, std::size_t size) :
-                    m_first(&buffers.allocate_static(size)),
+                    m_first(buffers.allocate_static(size)),
                     m_current(m_first),
                     m_buffers(buffers),
                 {}
@@ -319,7 +321,7 @@ namespace monkeymem {
                             // Update the buffers
                             [this, &offset, bytes](){
                                 // The first thread to reach the synced block must allocate a new buffer
-                                auto* buffer = &m_buffers.allocate();
+                                auto* buffer = m_buffers.allocate<OutOfSpacePolicyType>();
                                 // Set the end of the buffer
                                 m_current->end(offset);
                                 // Link new buffer into chain
