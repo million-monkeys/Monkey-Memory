@@ -5,7 +5,7 @@ Library for memory pooling and allocation based on the idea of a linked list of 
 
 Everything is in the `monkeymem` namespace. This namespace is omitted in the example code below.
 
-## Raw memory allocation
+# Raw memory allocation
 
 The library does not allocate its own memory, instaed the user must provide an allocator by subclassing the `MemoryAllocator` class:
 
@@ -106,3 +106,39 @@ buffers.reset(); // buffer2 is now invalid and must no longer be used. buffer1 i
 
 Typically, static buffers are used as the *first* buffer in a chain, while dynamic buffers are the subsequent buffers that are added on demaind from the pre-allocated pool. It is recommended that the static buffer is sized to accommodate the average size requirement, so that the typical use of the buffer will fit within a single static buffer, and that dynamic buffers are used to handle the cases when there is a spike in requirements. For example, a typical use case would be a game event system: if most frames are expected to dispatch 10 events, then the first (static) buffer in the chain should be sized to fit 10 events (or perhaps slightly more like 11 or 12), but if there is a sudden spike in activity that requires 15 or 20 events, dynamic buffers are added to the chain for that frame to accommodate the extra events.
 
+# Pools
+
+Similar to how Buffers are not expected to be created directly, it is also not expected that `BufferPools` are used to allocate buffers directly. Instead, they should be created (their dynamic pool preallocated) and then passed to higher level abstractions to actually manage buffer allocations. One such abstraction is the `Pool`, which is a buffer-backed utility to allocate chunks of memory. Pools can be typed (they allocate typed objects) or untyped (they allocate a series of bytes) and they can be heterogeneous (each allocation can be of a different size) or homogeneous (each allocation is identical). Typed pools are built on top of untyped pools.
+
+# Heterogeneous Pools
+
+Heterogeneous pools dish out varying amounts of bytes from an underlying buffer, handle buffer chaining internally and come in both atomic and non-atomic forms. The non-atomic pools are slightly more efficent, but cannot be safely used across multiple threads unsynchronized.
+
+## StackPool
+
+The `StackPool` allocates bytes as if from a stack: each subsequent allocation uses the next bytes after the previous allocation. There is no way to deallocate any particular allocation, but the entire pool can be `reset` all at once, deallocating everything all at once (and releasing any chained dynamic buffers back to the underlying `BufferPool`).
+As the heterogeneous `StackPool` only operates on bytes, no destructors will be called on any allocated objects on reset, so the allocated memory should only be used to store POD types.
+
+`StackPool`'s can be created from a `BufferPool`:
+```cpp
+BufferPool buffers{allocator, 100, 1024};
+
+std::size_t size_of_static_buffer = 100; // In bytes
+StackPool pool{buffers, size_of_static_buffer};
+```
+Once a pool has been created, chunks of memory may be allocated from it:
+```cpp
+std::byte* ptr1 = pool.allocate(32); // Allocate 32 bytes
+std::byte* ptr2 = pool.allocate(7); // Allocate 7 bytes
+```
+Helpers are provided for allocating typed objects from a `StackPool`. These objects *must* be POD types:
+```cpp
+struct Foo { int a; };
+Foo* foo1 = pool.emplace<Foo>(10);
+Foo foo2{12};
+pool.push_back(foo2);
+```
+The `StackPool` can be reset, making its alloocatings start from the start of the buffer again, effectively freeing the allocated memory:
+```
+pool.reset();
+```
