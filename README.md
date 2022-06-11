@@ -85,7 +85,7 @@ A `BufferPool` contains two collections of buffers:
 * Static buffers, these buffers are allocated once and kept for the lifetime of the `BufferPool`.
 * Dynamic buffers, these are buffers that are allocated on demand and released all at once at a sync point (eg once per game frame)
 
-Ironically, static buffers are allocated dynamically on demand while dynamic buffers are allocated once statically on creation.
+Ironically, static buffers are allocated dynamically on demand while dynamic buffers are allocated once statically on creation. Allocating a static buffer is an expensive operation, as memory must be allocated for it, but allocating a dynamic buffer from the pool is cheap (incrementing an atomic integer).
 
 Creating a `BufferPool`:
 ```cpp
@@ -104,5 +104,5 @@ Buffer& buffer2 = buffers.allocate(); // Allocate one of the 100 pre-allocated d
 buffers.reset(); // buffer2 is now invalid and must no longer be used. buffer1 is still valid
 ```
 
-Typically, static buffers are used as the *first* buffer in a chain, while dynamic buffers are the subsequent buffers that are added on demaind from the pre-allocated pool. Allocating a static buffer is an expensive operation, as memory must be allocated for it, but allocating a dynamic buffer from the pool is cheap (incrementing an atomic integer).
+Typically, static buffers are used as the *first* buffer in a chain, while dynamic buffers are the subsequent buffers that are added on demaind from the pre-allocated pool. It is recommended that the static buffer is sized to accommodate the average size requirement, so that the typical use of the buffer will fit within a single static buffer, and that dynamic buffers are used to handle the cases when there is a spike in requirements. For example, a typical use case would be a game event system: if most frames are expected to dispatch 10 events, then the first (static) buffer in the chain should be sized to fit 10 events (or perhaps slightly more like 11 or 12), but if there is a sudden spike in activity that requires 15 or 20 events, dynamic buffers are added to the chain for that frame to accommodate the extra events.
 
