@@ -22,8 +22,8 @@ A helper class `MemoryAllocatorWrapper` is provided that wraps an allocation and
 ```cpp
 std::byte* alloc (std::size_t size) { return new std::byte[size]; }
 void dealloc (std::byte* ptr, std::size_t size) { delete [] ptr; }
-
 MemoryAllocatorWrapper allocator{alloc, dealloc};
+
 // Or using lambdas:
 MemoryAllocatorWrapper allocator{
     [](auto size){ return new std::byte[size]; },
