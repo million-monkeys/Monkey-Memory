@@ -40,7 +40,7 @@ Buffer buffer = mm::Buffer::create(allocator, buffer_size_in_bytes);
 Buffer::destroy(allocator, buffer);
 ```
 Buffers support being moved:
-```
+```cpp
 Buffer a = ...;
 Buffer b = std::move(a);
 Buffer c{std::move(b)};
@@ -60,7 +60,7 @@ A buffers contents can be indexed into by byte index. Accessing an out of range 
 ```cpp
 buffer[10] = 0x1f;
 ```
-Finally, a view into a buffer can be created. This will return a new buffer that points into the content of the original buffer:
+A view into a buffer can be created. This will return a new buffer that points into the content of the original buffer:
 ```cpp
 std::size_t buffer_size_in_bytes = 120;
 Buffer buffer = mm::Buffer::create(allocator, buffer_size_in_bytes);
@@ -68,6 +68,14 @@ Buffer view = buffer.view(10, 20); // 10 = start index, 20 = size in bytes
 assert(view[0] == buffer[10]);
 assert(view.data() + view.size() == buffer.data() + 10 + 20);
 ```
+Buffers can also be chained together in a linked list:
+```cpp
+Buffer buffer1 = mm::Buffer::create(allocator, buffer_size_in_bytes);
+Buffer buffer2 = mm::Buffer::create(allocator, buffer_size_in_bytes);
+buffer1.next(&buffer2);
+assert(buffer1.next() == &buffer2);
+```
+Monkey Memory also provides iterators that seamlessly iterate through objects allocated into a chain of buffers, allowing them to be accessed as if they were a single large buffer. 
 
 # BufferPool
 
@@ -95,3 +103,6 @@ Buffer& buffer2 = buffers.allocate(); // Allocate one of the 100 pre-allocated d
 
 buffers.reset(); // buffer2 is now invalid and must no longer be used. buffer1 is still valid
 ```
+
+Typically, static buffers are used as the *first* buffer in a chain, while dynamic buffers are the subsequent buffers that are added on demaind from the pre-allocated pool. Allocating a static buffer is an expensive operation, as memory must be allocated for it, but allocating a dynamic buffer from the pool is cheap (incrementing an atomic integer).
+
