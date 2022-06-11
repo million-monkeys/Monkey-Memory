@@ -3,6 +3,8 @@ Memory management library
 
 Library for memory pooling and allocation based on the idea of a linked list of buffers.
 
+This is a single header library. Simply add `include` to your include path and include the header in your code: `#include <monkeymem.hpp>`
+
 Everything is in the `monkeymem` namespace. This namespace is omitted in the example code below.
 
 # Raw memory allocation
