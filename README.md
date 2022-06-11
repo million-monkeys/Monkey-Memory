@@ -98,8 +98,8 @@ BufferPool buffers{
 
 Buffers can be allocated:
 ```cpp
-Buffer& buffer1 = buffers.allocate_static(512); // Allocate static buffer of 512 bytes in size
-Buffer& buffer2 = buffers.allocate(); // Allocate one of the 100 pre-allocated dynamic buffers
+Buffer* buffer1 = buffers.allocate_static(512); // Allocate static buffer of 512 bytes in size
+Buffer* buffer2 = buffers.allocate(); // Allocate one of the 100 pre-allocated dynamic buffers
 
 buffers.reset(); // buffer2 is now invalid and must no longer be used. buffer1 is still valid
 ```
