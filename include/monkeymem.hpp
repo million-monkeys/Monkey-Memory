@@ -35,7 +35,7 @@ namespace monkeymem {
 
     namespace alignment {
         struct NoAlign {
-            static constexpr int Bountary = 0;
+            static constexpr int Boundary = 0;
             static std::uint32_t adjust_size (std::uint32_t size) { return size; }
             template <typename T> static T* align (void* buffer) {
                 return reinterpret_cast<T*>(buffer);
@@ -44,7 +44,7 @@ namespace monkeymem {
 
         template <int BoundaryT>
         struct Aligned {
-            static constexpr int Bountary = BoundaryT;
+            static constexpr int Boundary = BoundaryT;
             static std::uint32_t adjust_size (std::uint32_t size) { return size + BoundaryT; }
             template <typename T> static T* align (void* buffer) {
                 return reinterpret_cast<T*>(helpers::align(buffer, BoundaryT));
@@ -148,6 +148,22 @@ namespace monkeymem {
             return m_memory;
         }
 
+        std::byte* begin () const {
+            return m_memory;
+        }
+
+        std::byte* end () const {
+            return m_memory + m_end;
+        }
+
+        // Set the end of the buffer
+        void end (std::size_t e) {
+            if (e > m_size) {
+                throw std::out_of_range("Buffer end cannot be greater than size");
+            }
+            m_end = e;
+        }
+
         std::byte& operator[](std::size_t index)
         {
             if (index < m_size) {
@@ -176,31 +192,33 @@ namespace monkeymem {
             m_next = next_buffer;
         }
 
+        // Reset buffer end and linkage
+        void reset () {
+            m_next = nullptr;
+            m_end = 0;
+        }
+
     private:
         std::size_t m_size;
-        std::uint32_t m_offset;
+        std::uint16_t m_offset;
+        std::uint16_t m_end;
         std::byte*  m_memory;
         Buffer* m_next; // Buffers support linking
     };
 
-    template <int Alignment>
+    template <typename Alignment=alignment::NoAlign>
     class BufferPool {
     public:
+        static constexpr int AlignmentBoundary = Alignment::Boundary;
         using iterator = std::vector<Buffer>::iterator;
         using const_iterator = std::vector<Buffer>::const_iterator;
 
         BufferPool (MemoryAllocator& allocator, std::size_t count, std::size_t buffer_size) : m_allocator(allocator), m_next(0) {
             for (auto i=0; i<count; ++i) {
-                m_buffer.emplace_back(Buffer::create(allocator, buffer_size, Alignment));
+                m_buffer.emplace_back(Buffer::create(allocator, buffer_size, AlignmentBoundary));
             }
         }
-        ~BufferPool () {
-            clear();
-        }
-
-        Buffer& operator[] (std::size_t index) {
-            return m_buffer[index];
-        }
+        ~BufferPool () {}
 
         const Buffer& operator[] (std::size_t index) const {
             return m_buffer[index];
@@ -233,21 +251,21 @@ namespace monkeymem {
             m_buffers.clear();
         }
 
-        Buffer* allocate () {
-            return &m_buffers[m_next.fetch_add(1)];
+        Buffer& allocate () {
+            return m_buffers[m_next.fetch_add(1)];
         }
 
         void reset () {
             auto last = m_next.load();
             for (auto i=0; i<last; ++i) {
-                m_buffers[i].next(nullptr);
+                m_buffers[i].reset();
             }
             m_next.store(0);
         }
 
-        Buffer* allocate_static (std::size_t buffer_size) {
-            m_static_buffers.emplace_back(Buffers::create(m_allocator, buffer_size, Alignment));
-            return &m_static_buffers.back();
+        Buffer& allocate_static (std::size_t buffer_size) {
+            m_static_buffers.emplace_back(Buffers::create(m_allocator, buffer_size, AlignmentBoundary));
+            return m_static_buffers.back();
         }
 
     private:
@@ -272,7 +290,7 @@ namespace monkeymem {
                 using OutOfSpacePolicyType = OutOfSpacePolicy;
 
                 BaseStackPool (BufferPool& buffers, std::size_t size) :
-                    m_first(buffers.allocate_static(size)),
+                    m_first(&buffers.allocate_static(size)),
                     m_current(m_first),
                     m_buffers(buffers),
                 {}
@@ -301,9 +319,14 @@ namespace monkeymem {
                             // Update the buffers
                             [this, &offset, bytes](){
                                 // The first thread to reach the synced block must allocate a new buffer
-                                auto* buffer = m_buffers.allocate();
+                                auto* buffer = &m_buffers.allocate();
+                                // Set the end of the buffer
+                                m_current->end(offset);
+                                // Link new buffer into chain
                                 m_current->next(buffer);
+                                // Set new buffer as current
                                 m_current = buffer;
+                                // Allocate bytes in new buffer
                                 Impl::put(bytes);
                                 // Set the offset to the start of the buffer
                                 offset = 0;
@@ -330,11 +353,15 @@ namespace monkeymem {
 
                 void reset () {
                     Impl::put(0);
+                    m_first->reset();
                     m_current = m_first;
                 }
 
                 // Access underlying data
                 const Buffer& data () const {
+                    // Make sure the latest buffer is properly sized
+                    m_current->end(load());
+                    // Return a reference to the first buffer
                     return *m_first;
                 }
 
