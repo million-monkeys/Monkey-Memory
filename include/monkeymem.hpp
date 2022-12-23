@@ -471,8 +471,8 @@ namespace monkeymem {
             }
 
             template <typename T>
-            void push_back (const T& item) {
-                new(alloc<T>()) T{item};
+            T* push_back (const T& item) {
+                return new(alloc<T>()) T{item};
             }
 
             void reset () {

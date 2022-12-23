@@ -77,7 +77,14 @@ Buffer buffer2 = mm::Buffer::create(allocator, buffer_size_in_bytes);
 buffer1.next(&buffer2);
 assert(buffer1.next() == &buffer2);
 ```
-Monkey Memory also provides iterators that seamlessly iterate through objects allocated into a chain of buffers, allowing them to be accessed as if they were a single large buffer. 
+Monkey Memory also provides iterators that seamlessly iterate through objects allocated into a chain of buffers, allowing them to be accessed as if they were a single large buffer.
+
+It is also possible to "walk" the chain of links to access each of the buffers in turn:
+```cpp
+Buffer::walk(buffer1, [](auto& buffer){
+  // Will be called twice, first with buffer = buffer1 and again with buffer = buffer2
+});
+```
 
 # BufferPool
 
@@ -167,9 +174,17 @@ Helpers are provided for allocating typed objects from a `StackPool`. These obje
 struct Foo { int a; };
 Foo* foo1 = pool.emplace<Foo>(10);
 Foo foo2{12};
-pool.push_back(foo2);
+Foo* ptr = pool.push_back(foo2);
 ```
-The `StackPool` can be reset, making its alloocatings start from the start of the buffer again, effectively freeing the allocated memory:
+The `StackPool`'s underlying buffers can be accessed through `pool.data()`, allowing them to be used with `Buffer::walk(...)` in order to access their raw memory:
+```cpp
+Buffer::walk(pool.data(), [](auto& buffer){
+    
+});
+```
+This will "walk" the buffers linked buffers 
+
+The `StackPool` can be reset, making its allocations start from the start of the buffer again, effectively freeing the allocated memory:
 ```
 pool.reset();
 ```
