@@ -81,7 +81,7 @@ Monkey Memory also provides iterators that seamlessly iterate through objects al
 
 It is also possible to "walk" the chain of links to access each of the buffers in turn:
 ```cpp
-Buffer::walk(buffer1, [](auto& buffer){
+buffer1.walk([](auto& buffer){
   // Will be called twice, first with buffer = buffer1 and again with buffer = buffer2
 });
 ```
@@ -178,7 +178,7 @@ Foo* ptr = pool.push_back(foo2);
 ```
 The `StackPool`'s underlying buffers can be accessed through `pool.data()`, allowing them to be used with `Buffer::walk(...)` in order to access their raw memory:
 ```cpp
-Buffer::walk(pool.data(), [](auto& buffer){
+pool.data().walk([](auto& buffer){
     
 });
 ```

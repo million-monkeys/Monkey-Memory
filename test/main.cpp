@@ -44,8 +44,7 @@ int main (int argc, char** argv)
         pool.push_back(B{2, 3});
     }
 
-    auto buff = pool.data();
-    mm::Buffer::walk(buff, [](auto& buffer){
+    pool.data().walk([](auto& buffer){
         std::cout << buffer.size() << "\n";
     });
 

@@ -297,21 +297,21 @@ namespace monkeymem {
             m_end = m_size;
         }
 
-    private:
-        std::byte*  m_memory;
-        Buffer* m_next; // Buffers support linking
-        std::uint16_t m_size;
-        std::uint16_t m_end;
-
-    public:
         // Walk through this and each linked buffer
-        template <typename Func> static void walk (const Buffer& first, Func func) {
-            const Buffer* cur = &first;
+        template <typename Func>
+        void walk ( Func func) {
+            const Buffer* cur = this;
             do {
                 func(*cur);
                 cur = cur->next();
             } while (cur != nullptr);
         }
+
+    private:
+        std::byte*  m_memory;
+        Buffer* m_next; // Buffers support linking
+        std::uint16_t m_size;
+        std::uint16_t m_end;
     };
 
     template <typename Alignment=alignment::NoAlign>
@@ -456,6 +456,9 @@ namespace monkeymem {
                             offset = 0;
                         }
                     );
+                    if (m_current == nullptr) {
+                        return nullptr;
+                    }
                 }
                 return m_current->data() + offset;
             }
@@ -467,12 +470,20 @@ namespace monkeymem {
             // Allocate and construct
             template <typename T, typename... Args>
             T& emplace (Args&&... args) {
-                return *new(alloc<T>()) T{args...};
+                auto ptr = alloc<T>();
+                if (!ptr) {
+                    return nullptr;
+                }
+                return *new(ptr) T{args...};
             }
 
             template <typename T>
             T* push_back (const T& item) {
-                return new(alloc<T>()) T{item};
+                auto ptr = alloc<T>();
+                if (!ptr) {
+                    return nullptr;
+                }
+                return new(ptr) T{item};
             }
 
             void reset () {
