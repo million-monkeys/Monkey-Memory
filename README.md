@@ -148,7 +148,7 @@ Heterogeneous pools dish out varying amounts of bytes from an underlying buffer,
 ## StackPool
 
 The `StackPool` allocates bytes as if from a stack: each subsequent allocation uses the next bytes after the previous allocation. There is no way to deallocate any particular allocation, but the entire pool can be `reset` all at once, deallocating everything all at once (and releasing any chained dynamic buffers back to the underlying `BufferPool`).
-As the heterogeneous `StackPool` only operates on bytes, no destructors will be called on any allocated objects on reset, so the allocated memory should only be used to store POD types.
+As the heterogeneous `StackPool` only operates on bytes, no destructors will be called on any allocated objects on reset, so the allocated memory should only be used to store trivial types.
 
 `StackPool`'s can be created from a `BufferPool`:
 ```cpp
@@ -162,7 +162,7 @@ Once a pool has been created, chunks of memory may be allocated from it:
 std::byte* ptr1 = pool.allocate(32); // Allocate 32 bytes
 std::byte* ptr2 = pool.allocate(7); // Allocate 7 bytes
 ```
-Helpers are provided for allocating typed objects from a `StackPool`. These objects *must* be POD types:
+Helpers are provided for allocating typed objects from a `StackPool`. These objects *must* be trivial types:
 ```cpp
 struct Foo { int a; };
 Foo* foo1 = pool.emplace<Foo>(10);
