@@ -86,24 +86,29 @@ buffer1.walk([](auto& buffer){
 });
 ```
 
-# BufferPool
+# buffer_pools
 
 Normally, buffers are not created individually as in the above examples. Typically, a collection of buffers would be allocated using a `BufferPool`.
 
-A `BufferPool` contains two collections of buffers:
+A buffer pool contains two collections of buffers:
 * Static buffers, these buffers are allocated once and kept for the lifetime of the `BufferPool`.
 * Dynamic buffers, these are buffers that are allocated on demand and released all at once at a sync point (eg once per game frame)
 
 Ironically, static buffers are allocated dynamically on demand while dynamic buffers are allocated once statically on creation. Allocating a static buffer is an expensive operation, as memory must be allocated for it, but allocating a dynamic buffer from the pool is cheap (incrementing an atomic integer).
 
-Creating a `BufferPool`:
+There are currently two types of buffer pools available, both have the same API:
+* `buffer_pools::AtomicStack` - A stack of buffers that can be atomically allocated, but cannot be deallocated (no op). Use `reset()` to reclaim allocated buffers.
+* `buffer_pools::FreeList` - A free-list based pool that allows buffers to be allocated and deallocated. Not currently thread safe.
+
+Creating a buffer pool:
 ```cpp
-BufferPool buffers{
+buffer_pools::AtomicStack buffers{
   allocator, // The allocator, as above
   100,       // Number of dynamic buffers contained in the pool
   1024       // Size, in bytes, of each dynamic buffer
 };
 ```
+Creating a free-list based pool is exacly the same, simply replace `AtomicStack` with `FreeList`.
 
 Buffers can be allocated:
 ```cpp
@@ -154,7 +159,7 @@ Heterogeneous pools dish out varying amounts of bytes from an underlying buffer,
 
 ## StackPool
 
-The `StackPool` allocates bytes as if from a stack: each subsequent allocation uses the next bytes after the previous allocation. There is no way to deallocate any particular allocation, but the entire pool can be `reset` all at once, deallocating everything all at once (and releasing any chained dynamic buffers back to the underlying `BufferPool`).
+The `heterogeneous::StackPool` allocates bytes as if from a stack: each subsequent allocation uses the next bytes after the previous allocation. There is no way to deallocate any particular allocation, but the entire pool can be `reset` all at once, deallocating everything all at once (and releasing any chained dynamic buffers back to the underlying `BufferPool`).
 As the heterogeneous `StackPool` only operates on bytes, no destructors will be called on any allocated objects on reset, so the allocated memory should only be used to store trivial types.
 
 `StackPool`'s can be created from a `BufferPool`:
@@ -162,8 +167,10 @@ As the heterogeneous `StackPool` only operates on bytes, no destructors will be 
 BufferPool buffers{allocator, 100, 1024};
 
 std::size_t size_of_static_buffer = 100; // In bytes
-StackPool pool{buffers, size_of_static_buffer};
+heterogeneous::StackPool pool{buffers, size_of_static_buffer};
 ```
+If declaring a variable without directly calling the constructor, the buffer pool type must be specified as a template argument. For example `heterogeneous::StackPool<buffer_pools::FreeList<>>`. This is also necessary if customizing the concurrency, alignment or out of space policies.
+
 Once a pool has been created, chunks of memory may be allocated from it:
 ```cpp
 std::byte* ptr1 = pool.allocate(32); // Allocate 32 bytes
@@ -182,9 +189,18 @@ pool.data().walk([](auto& buffer){
     
 });
 ```
-This will "walk" the buffers linked buffers 
+This will "walk" the `StackPool`'s linked buffers 
 
-The `StackPool` can be reset, making its allocations start from the start of the buffer again, effectively freeing the allocated memory:
+The `StackPool` can be reset, making its allocations start from the start of the first buffer again and releasing any subsequent buffers back into the buffer pool, effectively freeing the allocated memory:
 ```
 pool.reset();
+```
+By default, `StackPool`'s are not thread safe. This can also be explicitly requested:
+```
+heterogeneous::StackPool<buffer_pools::FreeList<>, concurrency_policies::Unsafe> pool{buffers, size_of_static_buffer};
+```
+Alternatively, a thread-safe `StackPool` can be requested:
+```
+heterogeneous::StackPool<buffer_pools::FreeList<>, concurrency_policies::Atomic> pool{buffers, size_of_static_buffer};
+
 ```

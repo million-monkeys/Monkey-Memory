@@ -101,9 +101,9 @@ namespace monkeymem {
             void put (std::uint32_t value) {
                 next = value;
             }
-            template <typename Condition, typename Callback>
-            void synced (Condition, Callback callback) const {
-                callback(); // Condition optimized out in non-atomic version
+            template <typename Condition, typename AtomicOnlyCallback, typename Callback>
+            void synced (Condition, AtomicOnlyCallback, Callback callback) const {
+                callback(); // Condition & AtomicOnlyCallback are optimized out in non-atomic version
             }
         private:
             std::uint32_t next;
@@ -121,10 +121,11 @@ namespace monkeymem {
             void put (std::uint32_t value) {
                 next.store(value);
             }
-            template <typename Condition, typename Callback>
-            void synced (Condition condition, Callback callback) const {
+            template <typename Condition, typename AtomicOnlyCallback, typename Callback>
+            void synced (Condition condition, AtomicOnlyCallback ao_callback, Callback callback) const {
                 std::unique_lock<std::mutex> lock(m_mutex);
                 if (condition()) {
+                    ao_callback();
                     callback();
                 }
             }
@@ -275,6 +276,7 @@ namespace monkeymem {
 
         // Set the end of the buffer
         void end (std::size_t e) {
+            ERROR_LOG_FUNCTION("Buffer end: ", e);
             if (e > m_size) {
                 throw std::out_of_range("Buffer end cannot be greater than size");
             }
@@ -314,94 +316,165 @@ namespace monkeymem {
         std::uint16_t m_end;
     };
 
-    template <typename Alignment=alignment::NoAlign>
-    class BufferPool {
-    public:
-        static constexpr int AlignmentBoundary = Alignment::Boundary;
-        using iterator = std::vector<Buffer>::iterator;
-        using const_iterator = std::vector<Buffer>::const_iterator;
+    namespace buffer_pools {
+        template <typename Alignment=alignment::NoAlign>
+        class AtomicStack {
+        public:
+            static constexpr int AlignmentBoundary = Alignment::Boundary;
 
-        BufferPool (MemoryAllocator& allocator, std::size_t count, std::size_t buffer_size) : m_allocator(allocator), m_next(0) {
-            for (auto i=0; i<count; ++i) {
-                m_buffers.emplace_back(Buffer::create(allocator, buffer_size, AlignmentBoundary));
+            AtomicStack (MemoryAllocator& allocator, std::size_t count, std::size_t buffer_size) : m_allocator(allocator), m_next(0) {
+                m_buffers.reserve(count);
+                for (auto i=0; i<count; ++i) {
+                    auto& buf = m_buffers.emplace_back(Buffer::create(m_allocator, buffer_size, AlignmentBoundary));
+                }
             }
-        }
-        BufferPool (BufferPool&& other) : m_static_buffers(std::move(other.m_static_buffers)), m_buffers(std::move(other.m_buffers)), m_allocator(other.m_allocator), m_next(other.m_next) {
-            other.m_next = 0;
-        }
-        ~BufferPool () {
-            clear();
-        }
-
-        const Buffer& operator[] (std::size_t index) const {
-            return m_buffers[index];
-        }
-
-        iterator begin () {
-            return m_buffers.begin();
-        }
-
-        const_iterator begin () const {
-            return m_buffers.begin();
-        }
-
-        iterator end () {
-            return m_buffers.end();
-        }
-
-        const_iterator end () const {
-            return m_buffers.end();
-        }
-
-        std::size_t size () const {
-            return m_buffers.size();
-        }
-
-        void clear () {
-            for (auto& buffer : m_buffers) {
-                Buffer::destroy(m_allocator, buffer);
+            AtomicStack (AtomicStack&& other) : m_static_buffers(std::move(other.m_static_buffers)), m_buffers(std::move(other.m_buffers)), m_allocator(other.m_allocator), m_next(other.m_next) {
+                other.m_next = 0;
             }
-            m_buffers.clear();
-            for (auto& buffer : m_static_buffers) {
-                Buffer::destroy(m_allocator, buffer);
+            ~AtomicStack () {
+                clear();
             }
-            m_static_buffers.clear();
-        }
 
-        template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
-        Buffer* allocate () {
-            auto index = m_next.fetch_add(1);
-            if (index < m_buffers.size()) {
-                return &m_buffers[index];
-            } else {
-                return OutOfSpacePolicy::template apply<Buffer>("BufferPool");
+            std::size_t capacity () const {
+                return m_buffers.size();
             }
-        }
 
-        void reset () {
-            auto last = m_next.load();
-            for (auto i=0; i<last; ++i) {
-                m_buffers[i].reset();
+            std::size_t used () const {
+                return m_next.load();
             }
-            m_next.store(0);
-        }
 
-        Buffer* allocate_static (std::size_t buffer_size) {
-            m_static_buffers.emplace_back(Buffer::create(m_allocator, buffer_size, AlignmentBoundary));
-            return &m_static_buffers.back();
-        }
+            std::size_t available () const {
+                return capacity() - used();
+            }
 
-    private:
-        std::vector<Buffer> m_static_buffers;
-        std::vector<Buffer> m_buffers;
-        MemoryAllocator& m_allocator;
-        std::atomic_uint32_t m_next;
-    };
+            template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
+            Buffer* allocate () {
+                auto index = m_next.fetch_add(1);
+                if (index < m_buffers.size()) {
+                    return &m_buffers[index];
+                } else {
+                    return OutOfSpacePolicy::template apply<Buffer>("buffer_pools::AtomicStack");
+                }
+            }
+
+            void deallocate (Buffer*) { /* No Op */ }
+
+            void reset () {
+                auto last = m_next.load();
+                for (auto i=0; i<last; ++i) {
+                    m_buffers[i].reset();
+                }
+                m_next.store(0);
+            }
+
+            void clear () {
+                for (auto& buffer : m_buffers) {
+                    Buffer::destroy(m_allocator, buffer);
+                }
+                m_buffers.clear();
+                for (auto& buffer : m_static_buffers) {
+                    Buffer::destroy(m_allocator, buffer);
+                }
+                m_static_buffers.clear();
+            }
+
+            Buffer* allocate_static (std::size_t buffer_size) {
+                return &m_static_buffers.emplace_back(Buffer::create(m_allocator, buffer_size, AlignmentBoundary));
+            }
+
+        private:
+            std::vector<Buffer> m_static_buffers;
+            std::vector<Buffer> m_buffers;
+            MemoryAllocator& m_allocator;
+            std::atomic_uint32_t m_next;
+        };
+
+        template <typename Alignment=alignment::NoAlign>
+        class FreeList {
+        public:
+            static constexpr int AlignmentBoundary = Alignment::Boundary;
+
+            FreeList (MemoryAllocator& allocator, std::size_t count, std::size_t buffer_size) : m_allocator(allocator) {
+                m_buffers.reserve(count);
+                m_free_list.reserve(count);
+                for (auto i=0; i<count; ++i) {
+                    auto& buf = m_buffers.emplace_back(Buffer::create(m_allocator, buffer_size, AlignmentBoundary));
+                    m_free_list.push_back(&buf);
+                }            }
+            FreeList (FreeList&& other) : m_static_buffers(std::move(other.m_static_buffers)), m_buffers(std::move(other.m_buffers)), m_free_list(std::move(other.m_free_list)), m_allocator(other.m_allocator) {}
+            ~FreeList () {
+                clear();
+            }
+
+            std::size_t capacity () const {
+                return m_buffers.size();
+            }
+
+            std::size_t used () const {
+                return capacity() - available();
+            }
+
+            std::size_t available () const {
+                return m_free_list.size();
+            }
+
+            template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
+            Buffer* allocate () {
+                if (m_free_list.size()) {
+                    auto buffer = m_free_list.back();
+                    m_free_list.pop_back();
+                    return buffer;
+                } else {
+                    return OutOfSpacePolicy::template apply<Buffer>("buffer_pools::FreeList");
+                }
+            }
+
+            void deallocate (Buffer* buffer) {
+                Buffer* curr = buffer;
+                do {
+                    m_free_list.push_back(curr);
+                    auto next = curr->next();
+                    curr->reset();
+                    curr = next;
+                } while (curr != nullptr);
+            }
+
+            void reset () {
+                m_free_list.clear();
+                for (auto& buffer : m_buffers) {
+                    buffer.reset();
+                    m_free_list.push_back(&buffer);
+                }
+            }
+
+            void clear () {
+                for (auto& buffer : m_buffers) {
+                    Buffer::destroy(m_allocator, buffer);
+                }
+                m_buffers.clear();
+                m_free_list.clear();
+                for (auto& buffer : m_static_buffers) {
+                    Buffer::destroy(m_allocator, buffer);
+                }
+                m_static_buffers.clear();
+            }
+
+            Buffer* allocate_static (std::size_t buffer_size) {
+                return &m_static_buffers.emplace_back(Buffer::create(m_allocator, buffer_size, AlignmentBoundary));
+            }
+
+        private:
+            std::vector<Buffer> m_static_buffers;
+            std::vector<Buffer> m_buffers;
+            std::vector<Buffer*> m_free_list;
+            MemoryAllocator& m_allocator;
+        };
+    }
 
     namespace heterogeneous {
 
         // A basic stack allocator. Objects can be allocated from the top of the stack, but are deallocated all at once. Pointers to elements are stable until reset() is called.
-        template <typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
+        template <typename BufferPool, typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
         class StackPool {
         private:
             template <typename T>
@@ -412,7 +485,6 @@ namespace monkeymem {
             using ItemAlignType = ItemAlign;
             using OutOfSpacePolicyType = OutOfSpacePolicy;
 
-            template <typename BufferPool>
             StackPool (BufferPool& buffers, std::size_t size) :
                 m_first(buffers.allocate_static(size)),
                 m_current(m_first),
@@ -440,7 +512,11 @@ namespace monkeymem {
                             // Check whether the buffers still need updating
                             return offset + bytes > m_current->size();
                         },
-                        // Update the buffers
+                        // Only run in atomic version and only if previous lambda returns true
+                        [&offset, bytes](){
+                            offset -= bytes; // Remove the effect of the extra fetch_add added by running first lambda in atomic version
+                        },
+                        // Update the buffers, only if first lambda returns true
                         [this, &offset, bytes](){
                             // The first thread to reach the synced block must allocate a new buffer
                             auto* buffer = m_buffers.template allocate<OutOfSpacePolicyType>();
@@ -487,9 +563,16 @@ namespace monkeymem {
             }
 
             void reset () {
-                ConcurrencyPolicy::put(0);
-                m_first->reset();
-                m_current = m_first;
+                m_concurrency_policy.synced(
+                    [](){ return true; },
+                    [](){},
+                    [this](){
+                        ConcurrencyPolicy::put(0);
+                        m_buffers.deallocate(m_first->next());
+                        m_first->reset();
+                        m_current = m_first;
+                    }
+                );
             }
 
             // Access underlying data
@@ -497,6 +580,7 @@ namespace monkeymem {
                 // The current size of the latest buffer must be recorded
                 m_concurrency_policy.synced(
                     [](){ return true; },
+                    [](){},
                     [this](){
                         m_current->end(m_concurrency_policy.fetch());
                     }
@@ -508,7 +592,7 @@ namespace monkeymem {
         private:
             Buffer* m_first;
             Buffer* m_current;
-            BufferPool<ItemAlignType>& m_buffers;
+            BufferPool& m_buffers;
             ConcurrencyPolicy m_concurrency_policy;
         };
 
