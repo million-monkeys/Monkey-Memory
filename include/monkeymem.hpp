@@ -43,18 +43,26 @@ namespace monkeymem {
     namespace alignment {
         struct NoAlign {
             static constexpr int Boundary = 1;
-            static std::uint32_t adjust_size (std::uint32_t size) { return size; }
+            static constexpr std::uint32_t adjust_size (std::uint32_t size) { return size; }
             template <typename T> static T* align (void* buffer) {
                 return reinterpret_cast<T*>(buffer);
             }
+            static constexpr std::uint32_t fit_multiple (std::uint32_t size) { return size; }
         };
 
         template <int BoundaryT>
         struct Aligned {
             static constexpr int Boundary = BoundaryT;
-            static std::uint32_t adjust_size (std::uint32_t size) { return size + BoundaryT; }
+            static constexpr std::uint32_t adjust_size (std::uint32_t size) { return size + BoundaryT; }
             template <typename T> static T* align (void* buffer) {
                 return reinterpret_cast<T*>(helpers::align(buffer, BoundaryT));
+            }
+            static constexpr std::uint32_t fit_multiple (std::uint32_t size) {
+                std::uint32_t multiple = BoundaryT;
+                while (size > multiple) {
+                    multiple += BoundaryT;
+                }
+                return multiple;
             }
         };
 
@@ -88,50 +96,62 @@ namespace monkeymem {
 
     namespace concurrency_policies {
         struct Unsafe {
-        public:
-            Unsafe () : next(0) {}
-            std::uint32_t fetch () const {
-                return next;
-            }
-            std::uint32_t fetch_add (std::uint32_t amount) {
-                auto cur = next;
-                next += amount;
-                return cur;
-            }
-            void put (std::uint32_t value) {
-                next = value;
-            }
-            template <typename Condition, typename AtomicOnlyCallback, typename Callback>
-            void synced (Condition, AtomicOnlyCallback, Callback callback) const {
-                callback(); // Condition & AtomicOnlyCallback are optimized out in non-atomic version
-            }
-        private:
-            std::uint32_t next;
+            struct StackAllocatorPolicy {
+            public:
+                StackAllocatorPolicy () : next(0) {}
+                std::uint32_t fetch () const {
+                    return next;
+                }
+                std::uint32_t fetch_add (std::uint32_t amount) {
+                    auto cur = next;
+                    next += amount;
+                    return cur;
+                }
+                void put (std::uint32_t value) {
+                    next = value;
+                }
+                template <typename Condition, typename AtomicOnlyCallback, typename Callback>
+                void synced (Condition, AtomicOnlyCallback, Callback callback) const {
+                    callback(); // Condition & AtomicOnlyCallback are optimized out in non-atomic version
+                }
+            private:
+                std::uint32_t next;
+            };
+
+            struct BlockAllocatorPolicy {
+
+            };
         };
 
         struct Atomic {
-        public:
-            Atomic () : next(0) {}
-            std::uint32_t fetch () const {
-                return next.load();
-            }
-            std::uint32_t fetch_add (std::uint32_t amount) {
-                return next.fetch_add(amount);
-            }
-            void put (std::uint32_t value) {
-                next.store(value);
-            }
-            template <typename Condition, typename AtomicOnlyCallback, typename Callback>
-            void synced (Condition condition, AtomicOnlyCallback ao_callback, Callback callback) const {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                if (condition()) {
-                    ao_callback();
-                    callback();
+            struct StackAllocatorPolicy {
+            public:
+                StackAllocatorPolicy () : next(0) {}
+                std::uint32_t fetch () const {
+                    return next.load();
                 }
-            }
-        private:
-            std::atomic_uint32_t next;
-            mutable std::mutex m_mutex;
+                std::uint32_t fetch_add (std::uint32_t amount) {
+                    return next.fetch_add(amount);
+                }
+                void put (std::uint32_t value) {
+                    next.store(value);
+                }
+                template <typename Condition, typename AtomicOnlyCallback, typename Callback>
+                void synced (Condition condition, AtomicOnlyCallback ao_callback, Callback callback) const {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    if (condition()) {
+                        ao_callback();
+                        callback();
+                    }
+                }
+            private:
+                std::atomic_uint32_t next;
+                mutable std::mutex m_mutex;
+            };
+    
+            struct BlockAllocatorPolicy {
+
+            };
         };
     }
 
@@ -471,14 +491,46 @@ namespace monkeymem {
         };
     }
 
+    namespace data_access {
+        template <typename T>
+        struct PagedIterable {
+            PagedIterable (Buffer* buffer) : m_buffer(buffer) {}
+            T* begin() const { return reinterpret_cast<T*>(m_buffer->begin());}
+            T* end() const { return reinterpret_cast<T*>(m_buffer->end());}
+
+            bool next () {
+                m_buffer = m_buffer->next();
+                return m_buffer != nullptr;
+            }
+        private:
+            Buffer* m_buffer;
+            const T* m_begin_ptr;
+            const T* m_end_ptr;
+        };
+    }
+
+    namespace default_policies {
+        using Concurrency = concurrency_policies::Unsafe;
+        using ItemAlign = alignment::NoAlign;
+        using OutOfSpace = out_of_space_policies::Throw;
+    }
+
+    template <typename ConcurrencyPolicy = default_policies::Concurrency, typename ItemAlignPolicy = default_policies::ItemAlign, typename OutOfSpacePolicy = default_policies::OutOfSpace>
+    struct Policies {
+        using Concurrency = ConcurrencyPolicy;
+        using ItemAlign = ItemAlignPolicy;
+        using OutOfSpace = OutOfSpacePolicy;
+    };
+
     namespace heterogeneous {
 
         // A basic stack allocator. Objects can be allocated from the top of the stack, but are deallocated all at once. Pointers to elements are stable until reset() is called.
-        template <typename BufferPool, typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
+        template <typename BufferPool, typename Policies=Policies<>>
         class StackPool {
         public:
-            using ItemAlignType = ItemAlign;
-            using OutOfSpacePolicyType = OutOfSpacePolicy;
+            using ConcurrencyPolicyType = typename Policies::Concurrency::StackAllocatorPolicy;
+            using ItemAlignPolicyType = typename Policies::ItemAlign;
+            using OutOfSpacePolicyType = typename Policies::OutOfSpace;
 
             StackPool (BufferPool& buffers, std::size_t size) :
                 m_first(buffers.allocate_static(size)),
@@ -493,7 +545,7 @@ namespace monkeymem {
                 other.m_first = nullptr;
                 other.m_current = nullptr;
             }
-            virtual ~StackPool() {}
+            ~StackPool() {}
 
             // Allocate, but don't construct
             std::byte* unaligned_allocate (std::uint32_t bytes) {
@@ -535,7 +587,7 @@ namespace monkeymem {
             }
 
             std::byte* allocate (std::uint32_t bytes) {
-                return ItemAlign::template align<std::byte>(unaligned_allocate(ItemAlign::adjust_size(bytes)));
+                return ItemAlignPolicyType::template align<std::byte>(unaligned_allocate(ItemAlignPolicyType::adjust_size(bytes)));
             }
                 
             // Allocate and construct
@@ -562,7 +614,7 @@ namespace monkeymem {
                     [](){ return true; },
                     [](){},
                     [this](){
-                        ConcurrencyPolicy::put(0);
+                        ConcurrencyPolicyType::put(0);
                         m_buffers.deallocate(m_first->next());
                         m_first->reset();
                         m_current = m_first;
@@ -593,41 +645,24 @@ namespace monkeymem {
             Buffer* m_first;
             Buffer* m_current;
             BufferPool& m_buffers;
-            ConcurrencyPolicy m_concurrency_policy;
-            
+            ConcurrencyPolicyType m_concurrency_policy;
+
             template <typename T> T* alloc () {
-                return ItemAlign::template align<T>(unaligned_allocate(ItemAlign::adjust_size(sizeof(T))));
+                return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
             }
         };
 
-    }
-
-    namespace data_access {
-        template <typename T>
-        struct PagedIterable {
-            PagedIterable (Buffer* buffer) : m_buffer(buffer) {}
-            T* begin() const { return reinterpret_cast<T*>(m_buffer->begin());}
-            T* end() const { return reinterpret_cast<T*>(m_buffer->end());}
-
-            bool next () {
-                m_buffer = m_buffer->next();
-                return m_buffer != nullptr;
-            }
-        private:
-            Buffer* m_buffer;
-            const T* m_begin_ptr;
-            const T* m_end_ptr;
-        };
     }
 
     namespace homogeneous {
 
         // A basic stack allocator. Objects can be allocated from the top of the stack, but are deallocated all at once. Pointers to elements are stable until reset() is called.
-        template <typename T, typename BufferPool, typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
+        template <typename T, typename BufferPool, typename Policies=Policies<>>
         class StackPool {
         public:
-            using ItemAlignType = ItemAlign;
-            using OutOfSpacePolicyType = OutOfSpacePolicy;
+            using ConcurrencyPolicyType = typename Policies::Concurrency::StackAllocatorPolicy;
+            using ItemAlignPolicyType = typename Policies::ItemAlign;
+            using OutOfSpacePolicyType = typename Policies::OutOfSpace;
             using iterable = data_access::PagedIterable<T>;
             using const_iterable = data_access::PagedIterable<const T>;
 
@@ -640,7 +675,7 @@ namespace monkeymem {
             StackPool (StackPool&& other) :
                 m_impl(std::move(other.m_impl))
             {}
-            virtual ~StackPool() {}
+            ~StackPool() {}
 
             template <typename... Args>
             T* emplace (Args&&... args) {
@@ -679,8 +714,187 @@ namespace monkeymem {
             }
 
         private:
-            heterogeneous::StackPool<BufferPool, ConcurrencyPolicy, ItemAlign, OutOfSpacePolicy> m_impl;
+            heterogeneous::StackPool<BufferPool, Policies> m_impl;
         };
+
+        namespace block_pools {
+            namespace detail {
+                template <typename Derived, typename T>
+                class Base {
+                public:
+                    static constexpr std::size_t block_size = Derived::ItemAlignPolicyType::fit_multiple(sizeof(T));
+                    using iterable = data_access::PagedIterable<T>;
+                    using const_iterable = data_access::PagedIterable<const T>;
+
+                    iterable iter () const {
+                        // return iterable(m_impl.raw());
+                    }
+                    const_iterable const_iter () const {
+                        // return iterable(m_impl.raw());
+                    }
+
+                    template<typename Func> void each (Func func) const {
+                        auto it = iter();
+                        do {
+                            // Enforce constness of underlying if pool is const
+                            if constexpr (std::is_const_v<decltype(this)>) {
+                                for (const auto& item : it) {
+                                    func(item);
+                                }
+                            } else {
+                                for (auto& item : it) {
+                                    func(item);
+                                }
+                            }
+                        } while (it.next());
+                    }
+                };
+            }
+
+            template <typename T, typename BufferPool, typename Policies=Policies<>>
+            class Bitmap : detail::Base<Bitmap<T, BufferPool, Policies>, T> {
+                using Base = detail::Base<Bitmap<T, BufferPool, Policies>, T>;
+            public:
+                using value_type = T;
+                using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
+                using ItemAlignPolicyType = typename Policies::ItemAlign;
+                using OutOfSpacePolicyType = typename Policies::OutOfSpace;
+                
+                // Ctor taking unused T to allow template type inference
+                Bitmap (T, BufferPool& buffers, std::size_t size) : Bitmap(buffers, size) {}
+                // Normal ctors
+                Bitmap (BufferPool& buffers, std::size_t size) :
+                    m_first(buffers.allocate_static(size)),
+                    m_current(m_first),
+                    m_buffers(buffers)
+                {}
+                Bitmap (Bitmap&& other) :
+                    m_first(other.m_first),
+                    m_current(other.m_current),
+                    m_buffers(other.m_buffers)
+                {
+                    other.m_first = nullptr;
+                    other.m_current = nullptr;
+                }
+                ~Bitmap() {}
+
+                template <typename... Args>
+                T* emplace (Args&&... args) {
+                }
+
+                T* push_back (const T& item) {
+                }
+
+                void reset () {
+                }
+
+            private:
+                Buffer* m_first;
+                Buffer* m_current;
+                BufferPool& m_buffers;
+                ConcurrencyPolicyType m_concurrency_policy;
+
+                T* alloc () {
+                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
+                }
+            };
+
+            template <typename T, typename BufferPool, typename Policies=Policies<>>
+            class FreeList : detail::Base<FreeList<T, BufferPool, Policies>, T> {
+                using Base = detail::Base<FreeList<T, BufferPool, Policies>, T>;
+            public:
+                using value_type = T;
+                using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
+                using ItemAlignPolicyType = typename Policies::ItemAlign;
+                using OutOfSpacePolicyType = typename Policies::OutOfSpace;
+                
+                // Ctor taking unused T to allow template type inference
+                FreeList (T, BufferPool& buffers, std::size_t size) : FreeList(buffers, size) {}
+                // Normal ctors
+                FreeList (BufferPool& buffers, std::size_t size) :
+                    m_first(buffers.allocate_static(size)),
+                    m_current(m_first),
+                    m_buffers(buffers)
+                {}
+                FreeList (FreeList&& other) :
+                    m_first(other.m_first),
+                    m_current(other.m_current),
+                    m_buffers(other.m_buffers)
+                {
+                    other.m_first = nullptr;
+                    other.m_current = nullptr;
+                }
+                ~FreeList() {}
+
+                template <typename... Args>
+                T* emplace (Args&&... args) {
+                }
+
+                T* push_back (const T& item) {
+                }
+
+                void reset () {
+                }
+
+            private:
+                Buffer* m_first;
+                Buffer* m_current;
+                BufferPool& m_buffers;
+                ConcurrencyPolicyType m_concurrency_policy;
+
+                T* alloc () {
+                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
+                }
+            };
+
+            template <typename T, typename BufferPool, typename Policies=Policies<>>
+            class Moving : detail::Base<Moving<T, BufferPool, Policies>, T> {
+                using Base = detail::Base<Moving<T, BufferPool, Policies>, T>;
+            public:
+                using value_type = T;
+                using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
+                using ItemAlignPolicyType = typename Policies::ItemAlign;
+                using OutOfSpacePolicyType = typename Policies::OutOfSpace;
+
+                // Ctor taking unused T to allow template type inference
+                Moving (T, BufferPool& buffers, std::size_t size) : Moving(buffers, size) {}
+                // Normal ctors
+                Moving (BufferPool& buffers, std::size_t size) :
+                    m_first(buffers.allocate_static(size)),
+                    m_current(m_first),
+                    m_buffers(buffers)
+                {}
+                Moving (Moving&& other) :
+                    m_first(other.m_first),
+                    m_current(other.m_current),
+                    m_buffers(other.m_buffers)
+                {
+                    other.m_first = nullptr;
+                    other.m_current = nullptr;
+                }
+                ~Moving() {}
+
+                template <typename... Args>
+                T* emplace (Args&&... args) {
+                }
+
+                T* push_back (const T& item) {
+                }
+
+                void reset () {
+                }
+
+            private:
+                Buffer* m_first;
+                Buffer* m_current;
+                BufferPool& m_buffers;
+                ConcurrencyPolicyType m_concurrency_policy;
+
+                T* alloc () {
+                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
+                }
+            };
+        }
     }
 
 }

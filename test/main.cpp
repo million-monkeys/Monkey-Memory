@@ -18,6 +18,9 @@ struct A {
 struct B {
     int a, b;
 };
+struct C {
+    char c[17];
+};
 
 int main (int argc, char** argv)
 {
@@ -36,7 +39,7 @@ int main (int argc, char** argv)
 
     // mm::heterogeneous::StackPool pool(buffers, mm::units::kilobytes(10));
 
-    mm::heterogeneous::StackPool<mm::buffer_pools::FreeList<>, mm::concurrency_policies::Unsafe> pool(buffers, mm::units::kilobytes(10));
+    mm::heterogeneous::StackPool<mm::buffer_pools::FreeList<>, mm::Policies<mm::concurrency_policies::Unsafe>> pool(buffers, mm::units::kilobytes(10));
 
     pool.push_back(A{1});
 
@@ -55,14 +58,20 @@ int main (int argc, char** argv)
     mm::homogeneous::StackPool pool_a(A{}, buffers, mm::units::kilobytes(10));
     int items2 =  (mm::units::kilobytes(10) / sizeof(A)) * 3 - 1;
     log("Number of items: ", items2, " ", mm::units::kilobytes(10), " ", sizeof(A));
+    unsigned expected = 0;
     for (auto i = 0; i < items; i++) {
         pool_a.emplace(i);
+        expected += i;
     }
 
     // Iterate through pool
-    pool_a.each([](const auto& obj){
-        log("Value: ", obj.a);
+    unsigned result = 0;
+    pool_a.each([&result](const auto& obj){
+        result += obj.a;
     });
+    log("Expected = ", expected, " Result = ", result, " ", expected == result ? "SUCCESS" : "FAILED");
+
+    mm::homogeneous::block_pools::FreeList<C, decltype(buffers), mm::Policies<mm::default_policies::Concurrency, mm::alignment::AlignSIMD>> block_pool(buffers, mm::units::kilobytes(2));
 
     return 0;
 }
