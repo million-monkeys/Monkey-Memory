@@ -192,15 +192,15 @@ pool.data().walk([](auto& buffer){
 This will "walk" the `StackPool`'s linked buffers 
 
 The `StackPool` can be reset, making its allocations start from the start of the first buffer again and releasing any subsequent buffers back into the buffer pool, effectively freeing the allocated memory:
-```
+```cpp
 pool.reset();
 ```
 By default, `StackPool`'s are not thread safe. This can also be explicitly requested:
-```
+```cpp
 heterogeneous::StackPool<buffer_pools::FreeList<>, concurrency_policies::Unsafe> pool{buffers, size_of_static_buffer};
 ```
 Alternatively, a thread-safe `StackPool` can be requested:
-```
+```cpp
 heterogeneous::StackPool<buffer_pools::FreeList<>, concurrency_policies::Atomic> pool{buffers, size_of_static_buffer};
 
 ```

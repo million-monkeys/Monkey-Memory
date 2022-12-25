@@ -50,7 +50,19 @@ int main (int argc, char** argv)
         std::cout << buffer.size() << "\n";
     });
 
-    buffers.clear();
+    buffers.reset();
+
+    mm::homogeneous::StackPool pool_a(A{}, buffers, mm::units::kilobytes(10));
+    int items2 =  (mm::units::kilobytes(10) / sizeof(A)) * 3 - 1;
+    log("Number of items: ", items2, " ", mm::units::kilobytes(10), " ", sizeof(A));
+    for (auto i = 0; i < items; i++) {
+        pool_a.emplace(i);
+    }
+
+    // Iterate through pool
+    pool_a.each([](const auto& obj){
+        log("Value: ", obj.a);
+    });
 
     return 0;
 }

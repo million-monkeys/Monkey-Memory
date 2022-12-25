@@ -476,11 +476,6 @@ namespace monkeymem {
         // A basic stack allocator. Objects can be allocated from the top of the stack, but are deallocated all at once. Pointers to elements are stable until reset() is called.
         template <typename BufferPool, typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
         class StackPool {
-        private:
-            template <typename T>
-            T* alloc () {
-                return ItemAlign::template align<T>(unaligned_allocate(ItemAlign::adjust_size(sizeof(T))));
-            }
         public:
             using ItemAlignType = ItemAlign;
             using OutOfSpacePolicyType = OutOfSpacePolicy;
@@ -545,12 +540,12 @@ namespace monkeymem {
                 
             // Allocate and construct
             template <typename T, typename... Args>
-            T& emplace (Args&&... args) {
+            T* emplace (Args&&... args) {
                 auto ptr = alloc<T>();
                 if (!ptr) {
                     return nullptr;
                 }
-                return *new(ptr) T{args...};
+                return new(ptr) T{args...};
             }
 
             template <typename T>
@@ -576,7 +571,7 @@ namespace monkeymem {
             }
 
             // Access underlying data
-            Buffer data () const {
+            Buffer* raw () const {
                 // The current size of the latest buffer must be recorded
                 m_concurrency_policy.synced(
                     [](){ return true; },
@@ -586,16 +581,106 @@ namespace monkeymem {
                     }
                 );
                 // Then the first buffer is returned
-                return m_first->view(true);
+                return m_first;
             }
+
+            Buffer data () const {
+                return raw()->view(true);
+            }
+
 
         private:
             Buffer* m_first;
             Buffer* m_current;
             BufferPool& m_buffers;
             ConcurrencyPolicy m_concurrency_policy;
+            
+            template <typename T> T* alloc () {
+                return ItemAlign::template align<T>(unaligned_allocate(ItemAlign::adjust_size(sizeof(T))));
+            }
         };
 
+    }
+
+    namespace data_access {
+        template <typename T>
+        struct PagedIterable {
+            PagedIterable (Buffer* buffer) : m_buffer(buffer) {}
+            T* begin() const { return reinterpret_cast<T*>(m_buffer->begin());}
+            T* end() const { return reinterpret_cast<T*>(m_buffer->end());}
+
+            bool next () {
+                m_buffer = m_buffer->next();
+                return m_buffer != nullptr;
+            }
+        private:
+            Buffer* m_buffer;
+            const T* m_begin_ptr;
+            const T* m_end_ptr;
+        };
+    }
+
+    namespace homogeneous {
+
+        // A basic stack allocator. Objects can be allocated from the top of the stack, but are deallocated all at once. Pointers to elements are stable until reset() is called.
+        template <typename T, typename BufferPool, typename ConcurrencyPolicy = concurrency_policies::Unsafe, typename ItemAlign = alignment::NoAlign, typename OutOfSpacePolicy = out_of_space_policies::Throw>
+        class StackPool {
+        public:
+            using ItemAlignType = ItemAlign;
+            using OutOfSpacePolicyType = OutOfSpacePolicy;
+            using iterable = data_access::PagedIterable<T>;
+            using const_iterable = data_access::PagedIterable<const T>;
+
+            // Ctor taking unused T to allow template type inference
+            StackPool (T, BufferPool& buffers, std::size_t size) : StackPool(buffers, size) {}
+            // Normal ctors
+            StackPool (BufferPool& buffers, std::size_t size) :
+                m_impl(buffers, size)
+            {}
+            StackPool (StackPool&& other) :
+                m_impl(std::move(other.m_impl))
+            {}
+            virtual ~StackPool() {}
+
+            template <typename... Args>
+            T* emplace (Args&&... args) {
+                return m_impl.template emplace<T>(args...);
+            }
+
+            T* push_back (const T& item) {
+                return m_impl.push_back(item);
+            }
+
+            void reset () {
+                m_impl.reset();
+            }
+
+            iterable iter () const {
+                return iterable(m_impl.raw());
+            }
+            const_iterable const_iter () const {
+                return iterable(m_impl.raw());
+            }
+
+            template<typename Func> void each (Func func) const {
+                auto it = iter();
+                do {
+                    // Enforce constness of underlying if pool is const
+                    if constexpr (std::is_const_v<decltype(this)>) {
+                        for (const auto& item : it) {
+                            func(item);
+                        }
+                    } else {
+                        for (auto& item : it) {
+                            func(item);
+                        }
+                    }
+                } while (it.next());
+            }
+
+        private:
+            heterogeneous::StackPool<BufferPool, ConcurrencyPolicy, ItemAlign, OutOfSpacePolicy> m_impl;
+        };
     }
 
 }
