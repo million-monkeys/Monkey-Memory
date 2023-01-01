@@ -51,6 +51,7 @@ int main (int argc, char** argv)
 
     pool.data().walk([](auto& buffer){
         std::cout << buffer.size() << "\n";
+        return false;
     });
 
     buffers.reset();
@@ -71,7 +72,10 @@ int main (int argc, char** argv)
     });
     log("Expected = ", expected, " Result = ", result, " ", expected == result ? "SUCCESS" : "FAILED");
 
-    mm::homogeneous::block_pools::FreeList<C, decltype(buffers), mm::Policies<mm::default_policies::Concurrency, mm::alignment::AlignSIMD>> block_pool(buffers, mm::units::kilobytes(2));
+    mm::homogeneous::block_pools::FreeList<B, decltype(buffers), mm::Policies<mm::default_policies::Concurrency, mm::alignment::AlignSIMD>> block_pool(buffers, mm::units::kilobytes(2));
+
+    log("Adding to block pool");
+    [[maybe_unused]] B* item = block_pool.emplace(1, 2);
 
     return 0;
 }

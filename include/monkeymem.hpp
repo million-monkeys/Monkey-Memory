@@ -10,7 +10,34 @@
 #include <thread>
 #include <vector>
 
+#ifdef MONKEYMEM_OMIT_ALL_SAFETY_CHECKS
+#   define MONKEYMEM_OMIT_BUFFER_RANGE_CHECKS
+#   define MONKEYMEM_OMIT_POOL_RANGE_CHECKS
+#   define MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+#endif
+
+#if defined(__GNUC__) || defined(__clang__) || defined(__GNUG__)
+#   ifndef EXPECT_NOT_TAKEN
+#       define EXPECT_NOT_TAKEN(cond) (__builtin_expect(int(cond), 0))
+#   endif
+#   ifndef EXPECT_TAKEN
+#       define EXPECT_TAKEN(cond) (__builtin_expect(int(cond), 1))
+#   endif
+#else
+#   ifndef EXPECT_NOT_TAKEN
+#       define EXPECT_NOT_TAKEN(cond) (cond)
+#   endif
+#   ifndef EXPECT_TAKEN
+#       define EXPECT_TAKEN(cond) (cond)
+#   endif
+#endif
+
+
 namespace monkeymem {
+
+    class Buffer;
+    struct EarlyExit {};
+
 
     #ifndef ERROR_LOG_FUNCTION
         namespace log {
@@ -258,7 +285,7 @@ namespace monkeymem {
             return m_end;
         }
 
-        std::byte* data () {
+        std::byte* data () const {
             return m_memory;
         }
 
@@ -271,11 +298,15 @@ namespace monkeymem {
         }
 
         std::byte& operator[] (std::size_t index) {
-            if (index < m_end) {
+            #ifndef MONKEYMEM_OMIT_BUFFER_RANGE_CHECKS
+            if EXPECT_TAKEN(index < m_end) {
+            #endif
                 return m_memory[index];
+            #ifndef MONKEYMEM_OMIT_BUFFER_RANGE_CHECKS
             } else {
                 throw std::out_of_range("Buffer index out of range");
             }
+            #endif
         }
 
         Buffer view (std::size_t start_index, std::size_t size, bool include_next=false) {
@@ -296,10 +327,11 @@ namespace monkeymem {
 
         // Set the end of the buffer
         void end (std::size_t e) {
-            ERROR_LOG_FUNCTION("Buffer end: ", e);
-            if (e > m_size) {
+            #ifndef MONKEYMEM_OMIT_BUFFER_RANGE_CHECKS
+            if EXPECT_NOT_TAKEN(e > m_size) {
                 throw std::out_of_range("Buffer end cannot be greater than size");
             }
+            #endif
             m_end = e;
         }
 
@@ -321,10 +353,20 @@ namespace monkeymem {
 
         // Walk through this and each linked buffer
         template <typename Func>
-        void walk ( Func func) {
+        void walk (Func func) {
             const Buffer* cur = this;
             do {
                 func(*cur);
+                cur = cur->next();
+            } while (cur != nullptr);
+        }
+        template <typename Func>
+        void walk (EarlyExit, Func func) {
+            const Buffer* cur = this;
+            do {
+                if (! func(*cur)) {
+                    break;
+                }
                 cur = cur->next();
             } while (cur != nullptr);
         }
@@ -370,11 +412,15 @@ namespace monkeymem {
             template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
             Buffer* allocate () {
                 auto index = m_next.fetch_add(1);
-                if (index < m_buffers.size()) {
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                if EXPECT_TAKEN(index < m_buffers.size()) {
+                #endif
                     return &m_buffers[index];
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
                 } else {
                     return OutOfSpacePolicy::template apply<Buffer>("buffer_pools::AtomicStack");
                 }
+                #endif
             }
 
             void deallocate (Buffer*) { /* No Op */ }
@@ -440,23 +486,27 @@ namespace monkeymem {
 
             template <typename OutOfSpacePolicy=out_of_space_policies::Throw>
             Buffer* allocate () {
-                if (m_free_list.size()) {
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                if EXPECT_TAKEN(m_free_list.size()) {
+                #endif
                     auto buffer = m_free_list.back();
                     m_free_list.pop_back();
                     return buffer;
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
                 } else {
                     return OutOfSpacePolicy::template apply<Buffer>("buffer_pools::FreeList");
                 }
+                #endif
             }
 
             void deallocate (Buffer* buffer) {
                 Buffer* curr = buffer;
-                do {
+                while (curr != nullptr) {
                     m_free_list.push_back(curr);
                     auto next = curr->next();
                     curr->reset();
                     curr = next;
-                } while (curr != nullptr);
+                }
             }
 
             void reset () {
@@ -579,9 +629,11 @@ namespace monkeymem {
                             offset = 0;
                         }
                     );
-                    if (m_current == nullptr) {
+                    #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                    if EXPECT_NOT_TAKEN(m_current == nullptr) {
                         return nullptr;
                     }
+                    #endif
                 }
                 return m_current->data() + offset;
             }
@@ -594,19 +646,34 @@ namespace monkeymem {
             template <typename T, typename... Args>
             T* emplace (Args&&... args) {
                 auto ptr = alloc<T>();
-                if (!ptr) {
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                if EXPECT_NOT_TAKEN(!ptr) {
                     return nullptr;
                 }
+                #endif
                 return new(ptr) T{args...};
             }
 
             template <typename T>
             T* push_back (const T& item) {
                 auto ptr = alloc<T>();
-                if (!ptr) {
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                if EXPECT_NOT_TAKEN(!ptr) {
                     return nullptr;
                 }
+                #endif
                 return new(ptr) T{item};
+            }
+
+            template <typename T>
+            T* push_back (T&& item) {
+                auto ptr = alloc<T>();
+                #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                if EXPECT_NOT_TAKEN(!ptr) {
+                    return nullptr;
+                }
+                #endif
+                return new(ptr) T{std::move(item)};
             }
 
             void reset () {
@@ -686,7 +753,17 @@ namespace monkeymem {
                 return m_impl.push_back(item);
             }
 
+            T* push_back (T&& item) {
+                return m_impl.push_back(std::move(item));
+            }
+            
             void reset () {
+                if constexpr (! std::is_trivial<T>::value) {
+                    // Not a trivial type, so need to call the constructor
+                    each([](auto& it){
+                        it.~T();
+                    });
+                }
                 m_impl.reset();
             }
 
@@ -718,96 +795,20 @@ namespace monkeymem {
         };
 
         namespace block_pools {
-            namespace detail {
-                template <typename Derived, typename T>
-                class Base {
-                public:
-                    static constexpr std::size_t block_size = Derived::ItemAlignPolicyType::fit_multiple(sizeof(T));
-                    using iterable = data_access::PagedIterable<T>;
-                    using const_iterable = data_access::PagedIterable<const T>;
-
-                    iterable iter () const {
-                        // return iterable(m_impl.raw());
-                    }
-                    const_iterable const_iter () const {
-                        // return iterable(m_impl.raw());
-                    }
-
-                    template<typename Func> void each (Func func) const {
-                        auto it = iter();
-                        do {
-                            // Enforce constness of underlying if pool is const
-                            if constexpr (std::is_const_v<decltype(this)>) {
-                                for (const auto& item : it) {
-                                    func(item);
-                                }
-                            } else {
-                                for (auto& item : it) {
-                                    func(item);
-                                }
-                            }
-                        } while (it.next());
-                    }
-                };
-            }
 
             template <typename T, typename BufferPool, typename Policies=Policies<>>
-            class Bitmap : detail::Base<Bitmap<T, BufferPool, Policies>, T> {
-                using Base = detail::Base<Bitmap<T, BufferPool, Policies>, T>;
+            class FreeList {
+                static_assert(std::is_trivial<T>::value, "homogeneous::block_pools::FreeList<T> must contain a trivial type T");
             public:
                 using value_type = T;
                 using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
                 using ItemAlignPolicyType = typename Policies::ItemAlign;
                 using OutOfSpacePolicyType = typename Policies::OutOfSpace;
-                
-                // Ctor taking unused T to allow template type inference
-                Bitmap (T, BufferPool& buffers, std::size_t size) : Bitmap(buffers, size) {}
-                // Normal ctors
-                Bitmap (BufferPool& buffers, std::size_t size) :
-                    m_first(buffers.allocate_static(size)),
-                    m_current(m_first),
-                    m_buffers(buffers)
-                {}
-                Bitmap (Bitmap&& other) :
-                    m_first(other.m_first),
-                    m_current(other.m_current),
-                    m_buffers(other.m_buffers)
-                {
-                    other.m_first = nullptr;
-                    other.m_current = nullptr;
-                }
-                ~Bitmap() {}
+                using iterable = data_access::PagedIterable<T>;
+                using const_iterable = data_access::PagedIterable<const T>;
 
-                template <typename... Args>
-                T* emplace (Args&&... args) {
-                }
+                static constexpr std::size_t block_size = ItemAlignPolicyType::fit_multiple(sizeof(T));
 
-                T* push_back (const T& item) {
-                }
-
-                void reset () {
-                }
-
-            private:
-                Buffer* m_first;
-                Buffer* m_current;
-                BufferPool& m_buffers;
-                ConcurrencyPolicyType m_concurrency_policy;
-
-                T* alloc () {
-                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
-                }
-            };
-
-            template <typename T, typename BufferPool, typename Policies=Policies<>>
-            class FreeList : detail::Base<FreeList<T, BufferPool, Policies>, T> {
-                using Base = detail::Base<FreeList<T, BufferPool, Policies>, T>;
-            public:
-                using value_type = T;
-                using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
-                using ItemAlignPolicyType = typename Policies::ItemAlign;
-                using OutOfSpacePolicyType = typename Policies::OutOfSpace;
-                
                 // Ctor taking unused T to allow template type inference
                 FreeList (T, BufferPool& buffers, std::size_t size) : FreeList(buffers, size) {}
                 // Normal ctors
@@ -815,7 +816,9 @@ namespace monkeymem {
                     m_first(buffers.allocate_static(size)),
                     m_current(m_first),
                     m_buffers(buffers)
-                {}
+                {
+                    reset();
+                }
                 FreeList (FreeList&& other) :
                     m_first(other.m_first),
                     m_current(other.m_current),
@@ -825,15 +828,64 @@ namespace monkeymem {
                     other.m_current = nullptr;
                 }
                 ~FreeList() {}
-
+    
                 template <typename... Args>
-                T* emplace (Args&&... args) {
+                [[nodiscard]] T* emplace (Args&&... args) {
+                    auto ptr = allocate();
+                    #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                    if EXPECT_NOT_TAKEN(!ptr) {
+                        return nullptr;
+                    }
+                    #endif
+                    return new(ptr) T{args...};
                 }
 
-                T* push_back (const T& item) {
+                [[nodiscard]] T* push_back (const T& item) {
+                    auto ptr = allocate();
+                    #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                    if EXPECT_NOT_TAKEN(!ptr) {
+                        return nullptr;
+                    }
+                    #endif
+                    return new(ptr) T{item};
                 }
 
+                [[nodiscard]] T* push_back (T&& item) {
+                    auto ptr = allocate();
+                    #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                    if EXPECT_NOT_TAKEN(!ptr) {
+                        return nullptr;
+                    }
+                    #endif
+                    return new(ptr) T{std::move(item)};
+                }
+
+                void discard (T* object) const {
+                    const std::byte* addr = reinterpret_cast<std::byte*>(object);
+                    #ifndef MONKEYMEM_OMIT_POOL_RANGE_CHECKS
+                    bool invalid = false;
+                    m_first->walk(EarlyExit{}, [&invalid](auto& buffer){
+                        if (addr >= buffer.begin() && addr < buffer.end()) {
+                            return true;
+                        }
+                        invalid = true;
+                        return false;
+                    });
+                    if EXPECT_NOT_TAKEN(invalid) {
+                        throw std::runtime_error("homogeneous::block_pools::FreeList discarded object not belonging to pool");
+                    }
+                    #endif
+                    Item* item = reinterpret_cast<Item*>(object);
+                    item->next = m_next;
+                    m_next = item;
+                }
+                
                 void reset () {
+                    m_buffers.deallocate(m_first->next());
+                    m_first->reset();
+                    init_buffer(m_first);
+                    m_next = first(m_first);
+                    m_current = m_first;
                 }
 
             private:
@@ -842,19 +894,66 @@ namespace monkeymem {
                 BufferPool& m_buffers;
                 ConcurrencyPolicyType m_concurrency_policy;
 
-                T* alloc () {
-                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
+                union Item {
+                    T object;
+                    Item* next;
+                };
+                Item* m_next;
+
+                Item* first (Buffer* buffer) const {
+                    return reinterpret_cast<Item*>(buffer->begin());
+                }
+
+                void init_buffer (Buffer* buffer) const {
+                    std::byte* ptr = buffer->begin();
+                    do {
+                        std::byte* next = ptr + block_size;
+                        reinterpret_cast<Item*>(ptr)->next = reinterpret_cast<Item*>(next);
+                        ptr = next;
+                    } while (ptr < buffer->end());
+                    reinterpret_cast<Item*>(ptr - block_size)->next = nullptr;
+                }
+
+                [[nodiscard]] T* allocate () {
+                    Item* item;
+                    if EXPECT_TAKEN(m_next != nullptr) {
+                        // Get the item to return
+                        item = m_next;
+                    } else {
+                        // Allocate a new buffer
+                        auto* buffer = m_buffers.template allocate<OutOfSpacePolicyType>();
+                        #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
+                        if EXPECT_NOT_TAKEN(buffer == nullptr) {
+                            return nullptr;
+                        }
+                        #endif
+                        // Link new buffer into chain
+                        m_current->next(buffer);
+                        // Set new buffer as current
+                        m_current = buffer;
+                        // Initialise free list
+                        init_buffer(buffer);
+                        // Get the item to return
+                        item = first(buffer);
+                    }
+                    // Set the next free item
+                    m_next = item->next;
+                    // Return item
+                    return &item->object;
                 }
             };
 
             template <typename T, typename BufferPool, typename Policies=Policies<>>
-            class Moving : detail::Base<Moving<T, BufferPool, Policies>, T> {
-                using Base = detail::Base<Moving<T, BufferPool, Policies>, T>;
+            class Moving {
             public:
                 using value_type = T;
                 using ConcurrencyPolicyType = typename Policies::Concurrency::BlockAllocatorPolicy;
                 using ItemAlignPolicyType = typename Policies::ItemAlign;
                 using OutOfSpacePolicyType = typename Policies::OutOfSpace;
+                using iterable = data_access::PagedIterable<T>;
+                using const_iterable = data_access::PagedIterable<const T>;
+
+                static constexpr std::size_t block_size = ItemAlignPolicyType::fit_multiple(sizeof(T));
 
                 // Ctor taking unused T to allow template type inference
                 Moving (T, BufferPool& buffers, std::size_t size) : Moving(buffers, size) {}
@@ -880,8 +979,43 @@ namespace monkeymem {
 
                 T* push_back (const T& item) {
                 }
+                
+                T* push_back (T&& item) {
+                }
 
+                void discard (T* object) const {
+                }
+                
                 void reset () {
+                    if constexpr (! std::is_trivial<T>::value) {
+                        // Not a trivial type, so need to call the constructor
+                        each([](auto& it){
+                            it.~T();
+                        });
+                    }
+                }
+
+                iterable iter () const {
+                    // return iterable(m_impl.raw());
+                }
+                const_iterable const_iter () const {
+                    // return iterable(m_impl.raw());
+                }
+
+                template<typename Func> void each (Func func) const {
+                    auto it = iter();
+                    do {
+                        // Enforce constness of underlying if pool is const
+                        if constexpr (std::is_const_v<decltype(this)>) {
+                            for (const auto& item : it) {
+                                func(item);
+                            }
+                        } else {
+                            for (auto& item : it) {
+                                func(item);
+                            }
+                        }
+                    } while (it.next());
                 }
 
             private:
@@ -889,10 +1023,6 @@ namespace monkeymem {
                 Buffer* m_current;
                 BufferPool& m_buffers;
                 ConcurrencyPolicyType m_concurrency_policy;
-
-                T* alloc () {
-                    return ItemAlignPolicyType::template align<T>(unaligned_allocate(ItemAlignPolicyType::adjust_size(sizeof(T))));
-                }
             };
         }
     }
@@ -900,8 +1030,6 @@ namespace monkeymem {
 }
 
 #ifdef MONKEYMEM_IMPL
-
-
 
 #endif
 
