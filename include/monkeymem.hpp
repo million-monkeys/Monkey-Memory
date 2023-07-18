@@ -543,10 +543,63 @@ namespace monkeymem {
 
     namespace data_access {
         template <typename T>
+        struct Iterator {
+            using iterator_category = std::forward_iterator_tag;
+            using difference_type   = std::ptrdiff_t;
+            using value_type        = T;
+            using pointer           = value_type*;
+            using reference         = value_type&;
+
+            Iterator (pointer ptr) : m_ptr(reinterpret_cast<std::byte*>(ptr)) {}
+            Iterator (std::byte* ptr) : m_ptr(ptr) {}
+            Iterator (const Iterator& other) : m_ptr(other.m_ptr) {}
+            Iterator (Iterator&& other) : m_ptr(other.m_ptr) { other.m_ptr = nullptr; }
+
+            reference operator*() const {
+                return *reinterpret_cast<pointer>(m_ptr);
+            }
+
+            pointer operator->() {
+                return reinterpret_cast<pointer>(m_ptr);
+            }
+
+            // Prefix increment
+            Iterator& operator++() {
+                m_ptr += sizeof(value_type);
+                return *this;
+            }
+
+            // Postfix increment
+            Iterator operator++(int) {
+                Iterator tmp = *this;
+                ++(*this);
+                return tmp;
+            }
+
+            friend bool operator== (const Iterator& a, const Iterator& b) { return a.m_ptr == b.m_ptr; };
+            friend bool operator!= (const Iterator& a, const Iterator& b) { return a.m_ptr != b.m_ptr; };     
+
+        private:
+            std::byte* m_ptr;
+        };
+
+        template <typename T>
+        struct Iterable {
+            using iterator = Iterator<T>;
+            Iterable (Buffer* buffer) : m_buffer(buffer) {}
+            iterator begin () const { return iterator{m_buffer->begin()};}
+            iterator end () const { return iterator{m_buffer->end()};}
+
+        private:
+            Buffer* m_buffer;
+        };
+
+        template <typename T>
         struct PagedIterable {
+            using iterator = Iterator<T>;
             PagedIterable (Buffer* buffer) : m_buffer(buffer) {}
-            T* begin() const { return reinterpret_cast<T*>(m_buffer->begin());}
-            T* end() const { return reinterpret_cast<T*>(m_buffer->end());}
+            iterator begin () const { return iterator{m_buffer->begin()};}
+            iterator end () const { return iterator{m_buffer->end()};}
 
             bool next () {
                 m_buffer = m_buffer->next();
@@ -554,9 +607,42 @@ namespace monkeymem {
             }
         private:
             Buffer* m_buffer;
-            const T* m_begin_ptr;
-            const T* m_end_ptr;
         };
+
+        template <typename T>
+        struct ConstPagedIterable {
+            using iterator = Iterator<const T>;
+            ConstPagedIterable (const Buffer* buffer) : m_buffer(buffer) {}
+            iterator begin () const { return iterator{m_buffer->begin()};}
+            iterator end () const { return iterator{m_buffer->end()};}
+
+            bool next () {
+                m_buffer = m_buffer->next();
+                return m_buffer != nullptr;
+            }
+        private:
+            const Buffer* m_buffer;
+        };
+
+        template <typename T, typename Func>
+        void for_each (const Buffer* buffer, Func func) {
+            auto iter = PagedIterable<T>(buffer);
+            do {
+                for (auto& it : iter) {
+                    func(*it);
+                }
+            } while (iter->next());
+        }
+
+        template <typename T, typename Func>
+        void const_for_each (const Buffer* const buffer, Func func) {
+            auto iter = ConstPagedIterable<T>(buffer);
+            do {
+                for (const auto& it : iter) {
+                    func(*it);
+                }
+            } while (iter->next());
+        }
     }
 
     namespace default_policies {
@@ -645,17 +731,19 @@ namespace monkeymem {
             // Allocate and construct
             template <typename T, typename... Args>
             T* emplace (Args&&... args) {
+                static_assert(std::is_trivial_v<T>, "StackPool<T>::emplace(Args...) T must be trivial");
                 auto ptr = alloc<T>();
                 #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
                 if EXPECT_NOT_TAKEN(!ptr) {
                     return nullptr;
                 }
                 #endif
-                return new(ptr) T{args...};
+                return new(ptr) T{std::forward<Args>(args)...};
             }
 
             template <typename T>
             T* push_back (const T& item) {
+                static_assert(std::is_trivial_v<T>, "StackPool<T>::push_back(const T&) T must be trivial");
                 auto ptr = alloc<T>();
                 #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
                 if EXPECT_NOT_TAKEN(!ptr) {
@@ -667,6 +755,7 @@ namespace monkeymem {
 
             template <typename T>
             T* push_back (T&& item) {
+                static_assert(std::is_trivial_v<T>, "StackPool<T>::push_back(T&&) T must be trivial");
                 auto ptr = alloc<T>();
                 #ifndef MONKEYMEM_OMIT_OUTOFMEMORY_CHECKS
                 if EXPECT_NOT_TAKEN(!ptr) {

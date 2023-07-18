@@ -1,3 +1,4 @@
+// clang++ -stdlib=libc++ -std=c++17 -o test -O3 main.cpp -I../include
 
 #include <iostream>
 template <typename... Args>
